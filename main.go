@@ -16,8 +16,8 @@ import (
 // #include <linux/kd.h>
 import "C"
 
-const usage = `ledctl - controls keyboard leds.
-	
+const usage = `ledctl - controls keyboard LEDs.
+    
 Usage:
     $0 -h | --help
     $0 [options] -S -- <command>...
@@ -29,11 +29,11 @@ Options:
                <command> should begin either:
                  * with '+' for turning LED on;
                  * with '-' for turning LED off.
-			   The rest is name of the LED, possible values are:
-			     * scroll;
-			     * num;
-			     * caps;
-				 * all;
+               The rest is name of the LED, possible values are:
+                 * scroll;
+                 * num;
+                 * caps;
+                 * all;
       -i       Read <command> from stdin.
     -t <tty>   TTY name [default: /dev/tty1].
 `
@@ -48,7 +48,7 @@ var leds = map[string]byte{
 func main() {
 	args, err := docopt.Parse(
 		strings.Replace(usage, "$0", os.Args[0], -1),
-		nil, true, "ledctl 1.0", false,
+		nil, true, "ledctl 1", false,
 	)
 	if err != nil {
 		panic(err)
@@ -65,10 +65,15 @@ func main() {
 		wg      = sync.WaitGroup{}
 		done    = make(chan struct{}, 0)
 		control = make(chan string, 0)
+		state   = byte(0)
 	)
-
 	wg.Add(1)
 	go func() {
+		state, err = getLEDs(tty)
+		if err != nil {
+			log.Fatalf("can't get active LEDs: %s", err)
+		}
+
 		for {
 			select {
 			case <-done:
@@ -76,7 +81,7 @@ func main() {
 				return
 
 			case command := <-control:
-				err := applyLEDCommand(tty, command)
+				state, err = applyLEDCommand(tty, command, state)
 				if err != nil {
 					log.Print(err)
 				}
@@ -134,40 +139,35 @@ func setLEDs(tty *os.File, leds byte) error {
 	return nil
 }
 
-func applyLEDCommand(tty *os.File, command string) error {
+func applyLEDCommand(tty *os.File, command string, state byte) (byte, error) {
 	if len(command) < 2 {
-		return fmt.Errorf("invalid command: %s", command)
+		return state, fmt.Errorf("invalid command: %s", command)
 	}
 
 	if command[0] != '+' && command[0] != '-' {
-		return fmt.Errorf(
+		return state, fmt.Errorf(
 			"command do not have prefix '-' or '+': %s", command,
 		)
 	}
 
 	if _, ok := leds[command[1:]]; !ok {
-		return fmt.Errorf("unknown LED name: %s", command[1:])
+		return state, fmt.Errorf("unknown LED name: %s", command[1:])
 	}
 
 	LEDIndex := leds[command[1:]]
 
-	activeLEDs, err := getLEDs(tty)
-	if err != nil {
-		return fmt.Errorf("can't get active LEDs: %s", err)
-	}
-
 	newLEDs := byte(0)
 	switch command[0] {
 	case '-':
-		newLEDs = activeLEDs & (0xff ^ LEDIndex)
+		newLEDs = state & (0xff ^ LEDIndex)
 	case '+':
-		newLEDs = activeLEDs | LEDIndex
+		newLEDs = state | LEDIndex
 	}
 
-	err = setLEDs(tty, newLEDs)
+	err := setLEDs(tty, newLEDs)
 	if err != nil {
-		return fmt.Errorf("can't set LEDs: %s", err)
+		return state, fmt.Errorf("can't set LEDs: %s", err)
 	}
 
-	return nil
+	return newLEDs, nil
 }
