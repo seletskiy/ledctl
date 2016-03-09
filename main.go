@@ -116,6 +116,8 @@ func setLEDs(display *C.Display, values C.XKeyboardControl) {
 	} else {
 		C.XChangeKeyboardControl(display, C.KBLed|C.KBLedMode, &values)
 	}
+
+	C.XFlush(display)
 }
 
 func applyLEDCommand(
