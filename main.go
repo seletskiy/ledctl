@@ -7,17 +7,17 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
-	"unsafe"
 
 	"github.com/docopt/docopt-go"
 )
 
-// #include <linux/kd.h>
+// #cgo LDFLAGS: -lX11
+// #include <X11/Xlib.h>
+// #include <linux/input.h>
 import "C"
 
 const usage = `ledctl - controls keyboard LEDs.
-    
+
 Usage:
     $0 -h | --help
     $0 [options] -S -- <command>...
@@ -35,15 +35,19 @@ Options:
                  * caps;
                  * all;
       -i       Read <command> from stdin.
-    -t <tty>   TTY name [default: /dev/tty1].
 `
 
-var leds = map[string]byte{
-	"scroll": C.LED_SCR,
-	"num":    C.LED_NUM,
-	"caps":   C.LED_CAP,
-	"all":    0xff,
+var leds = map[string]C.int{
+	"scroll": C.LED_SCROLLL,
+	"num":    C.LED_NUML,
+	"caps":   C.LED_CAPSL,
+	"all":    -1,
 }
+
+const (
+	ledOn  = C.int(1)
+	ledOff = C.int(0)
+)
 
 func main() {
 	args, err := docopt.Parse(
@@ -54,26 +58,21 @@ func main() {
 		panic(err)
 	}
 
-	ttyName := args["-t"].(string)
-
-	tty, err := os.Open(ttyName)
-	if err != nil {
-		log.Fatalf("can't open terminal: %s", ttyName)
-	}
-
 	var (
 		wg      = sync.WaitGroup{}
 		done    = make(chan struct{}, 0)
 		control = make(chan string, 0)
-		state   = byte(0)
+		display = C.XOpenDisplay(C.CString(os.ExpandEnv("$DISPLAY")))
 	)
+
+	if display == nil {
+		log.Fatalf("can't open display")
+	}
+
+	defer C.XCloseDisplay(display)
+
 	wg.Add(1)
 	go func() {
-		state, err = getLEDs(tty)
-		if err != nil {
-			log.Fatalf("can't get active LEDs: %s", err)
-		}
-
 		for {
 			select {
 			case <-done:
@@ -81,7 +80,7 @@ func main() {
 				return
 
 			case command := <-control:
-				state, err = applyLEDCommand(tty, command, state)
+				err = applyLEDCommand(display, command)
 				if err != nil {
 					log.Print(err)
 				}
@@ -111,63 +110,39 @@ func main() {
 	wg.Wait()
 }
 
-func getLEDs(tty *os.File) (byte, error) {
-	var leds byte
-
-	_, _, err := syscall.Syscall(
-		syscall.SYS_IOCTL, tty.Fd(), uintptr(C.KDGETLED),
-		uintptr(unsafe.Pointer(&leds)),
-	)
-
-	if err != 0 {
-		return 0, fmt.Errorf("KDGETLED syscall error: %s", err)
+func setLEDs(display *C.Display, values C.XKeyboardControl) {
+	if values.led == leds["all"] {
+		C.XChangeKeyboardControl(display, C.KBLedMode, &values)
+	} else {
+		C.XChangeKeyboardControl(display, C.KBLed|C.KBLedMode, &values)
 	}
-
-	return leds, nil
 }
 
-func setLEDs(tty *os.File, leds byte) error {
-	_, _, err := syscall.Syscall(
-		syscall.SYS_IOCTL, tty.Fd(), uintptr(C.KDSETLED),
-		uintptr(leds),
-	)
-
-	if err != 0 {
-		return fmt.Errorf("KDSETLED syscall error: %s", err)
-	}
-
-	return nil
-}
-
-func applyLEDCommand(tty *os.File, command string, state byte) (byte, error) {
+func applyLEDCommand(
+	display *C.Display, command string,
+) error {
 	if len(command) < 2 {
-		return state, fmt.Errorf("invalid command: %s", command)
+		return fmt.Errorf("invalid command: %s", command)
 	}
 
 	if command[0] != '+' && command[0] != '-' {
-		return state, fmt.Errorf(
+		return fmt.Errorf(
 			"command do not have prefix '-' or '+': %s", command,
 		)
 	}
 
 	if _, ok := leds[command[1:]]; !ok {
-		return state, fmt.Errorf("unknown LED name: %s", command[1:])
+		return fmt.Errorf("unknown LED name: %s", command[1:])
 	}
 
 	LEDIndex := leds[command[1:]]
 
-	newLEDs := byte(0)
 	switch command[0] {
 	case '-':
-		newLEDs = state & (0xff ^ LEDIndex)
+		setLEDs(display, C.XKeyboardControl{led: LEDIndex, led_mode: ledOff})
 	case '+':
-		newLEDs = state | LEDIndex
+		setLEDs(display, C.XKeyboardControl{led: LEDIndex, led_mode: ledOn})
 	}
 
-	err := setLEDs(tty, newLEDs)
-	if err != nil {
-		return state, fmt.Errorf("can't set LEDs: %s", err)
-	}
-
-	return newLEDs, nil
+	return nil
 }
